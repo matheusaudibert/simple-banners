@@ -21,7 +21,7 @@ export const TEXT_STYLE: Record<
 > = {
   title: { size: 64, weight: 700, lineHeight: 1.18, gapBelow: 24 },
   subtitle: { size: 30, weight: 400, lineHeight: 1.35, gapBelow: 20 },
-  tagline: { size: 18, weight: 400, lineHeight: 1.45, gapBelow: 0 },
+  link: { size: 18, weight: 400, lineHeight: 1.45, gapBelow: 0 },
 };
 
 export const FONT_OPTIONS: { key: FontKey; label: string; stack: string }[] = [
@@ -34,32 +34,33 @@ export const FONT_OPTIONS: { key: FontKey; label: string; stack: string }[] = [
 export const fontStack = (key: FontKey): string =>
   FONT_OPTIONS.find((f) => f.key === key)?.stack ?? FONT_OPTIONS[0].stack;
 
-/** O PNG sai em 2x (2400×1260), bom para tela retina e para as redes. */
-export const EXPORT_SCALE = 2;
+/** Escalas de exportação; 2x (2400×1260) é o padrão, bom para telas retina. */
+export const EXPORT_SCALES = [1, 2, 3];
+export const DEFAULT_EXPORT_SCALE = 2;
 
 export function defaultState(): BannerState {
   return {
     background: "#ffffff",
     image: {
       enabled: true,
-      src: null,
-      radius: 50,
+      src: "/images/exemplo.jpg",
+      radius: 15,
     },
     title: {
       text: "Seu Nome Aqui",
-      font: "anthropic",
+      font: "excalifont",
       color: "#1a1a1a",
     },
     subtitle: {
       text: "Subtítulo",
-      font: "anthropic",
+      font: "excalifont",
       color: "#4a4a4a",
     },
-    tagline: {
+    link: {
       text: "https://seusite.dev",
-      font: "mono",
+      font: "excalifont",
       color: "#8a8a8a",
     },
-    collage: [],
+    elements: [],
   };
 }

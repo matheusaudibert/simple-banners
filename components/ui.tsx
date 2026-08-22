@@ -219,6 +219,22 @@ export const Icon = {
       <path d="M8 2.5 14 6l-6 3.5L2 6l6-3.5ZM2.5 9.5 8 12.7l5.5-3.2" />
     </svg>
   ),
+  Undo: () => (
+    <svg {...iconProps}>
+      <path d="M6 5.5H9.5a3.5 3.5 0 0 1 0 7H6M6 5.5 8.5 3M6 5.5 8.5 8" />
+    </svg>
+  ),
+  Redo: () => (
+    <svg {...iconProps}>
+      <path d="M10 5.5H6.5a3.5 3.5 0 0 0 0 7H10M10 5.5 7.5 3M10 5.5 7.5 8" />
+    </svg>
+  ),
+  NoFill: () => (
+    <svg {...iconProps}>
+      <rect x="3.5" y="3.5" width="9" height="9" rx="1.5" />
+      <path d="M3.5 12.5 12.5 3.5" />
+    </svg>
+  ),
   Plus: () => (
     <svg {...iconProps} width={13} height={13}>
       <path d="M8 3.5v9M3.5 8h9" />

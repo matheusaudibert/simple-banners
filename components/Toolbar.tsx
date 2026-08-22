@@ -1,35 +1,38 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import type { DrawStyle } from "@/lib/elements";
+import { STROKE_WIDTHS } from "@/lib/elements";
 import { FONT_OPTIONS } from "@/lib/presets";
-import type { BannerState, CollageItem, MainImage, Selection, TextLayer } from "@/lib/types";
-import {
-  Button,
-  Divider,
-  Icon,
-  IconButton,
-  MiniSelect,
-  MiniSlider,
-  Swatch,
-  cx,
-} from "./ui";
+import type {
+  BannerElement,
+  BannerState,
+  MainImage,
+  Selection,
+  TextLayer,
+  TextLayerKey,
+} from "@/lib/types";
+import { isShape } from "@/lib/types";
+import { Button, Divider, Icon, IconButton, MiniSelect, MiniSlider, Swatch, cx } from "./ui";
 
 export type ToolbarActions = {
   update: (patch: Partial<BannerState>) => void;
-  updateText: (key: "title" | "subtitle" | "tagline", patch: Partial<TextLayer>) => void;
+  updateText: (key: TextLayerKey, patch: Partial<TextLayer>) => void;
   updateImage: (patch: Partial<MainImage>) => void;
-  updateItem: (id: string, patch: Partial<CollageItem>) => void;
-  removeItem: (id: string) => void;
-  moveItem: (id: string, dir: "front" | "back") => void;
-  addCollageFiles: (files: File[]) => void;
-  addCollageUrl: (url: string) => void;
+  addElement: (element: BannerElement) => void;
+  updateElement: (id: string, patch: Partial<BannerElement>) => void;
+  removeElement: (id: string) => void;
+  moveElement: (id: string, dir: "front" | "back") => void;
+  addImageFiles: (files: File[]) => void;
+  addImageUrl: (url: string) => void;
+  setStyle: (patch: Partial<DrawStyle>) => void;
 };
 
 type Props = {
   selection: Selection;
   state: BannerState;
   actions: ToolbarActions;
-  /** posição, em px do preview, do elemento selecionado */
+  /** posição, em px do preview, do que está selecionado */
   anchor: { left: number; top: number; width: number } | null;
 };
 
@@ -41,8 +44,7 @@ export default function Toolbar({ selection, state, actions, anchor }: Props) {
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
-    const measure = () =>
-      setSize({ width: el.offsetWidth, height: el.offsetHeight });
+    const measure = () => setSize({ width: el.offsetWidth, height: el.offsetHeight });
     measure();
     const ro = new ResizeObserver(measure);
     ro.observe(el);
@@ -51,9 +53,10 @@ export default function Toolbar({ selection, state, actions, anchor }: Props) {
 
   if (!selection || !anchor) return null;
 
+  // sempre acima do que está selecionado: descer por cima do conteúdo
+  // atrapalha mais do que passar do topo do banner
   const gap = 12;
-  const above = anchor.top - size.height - gap;
-  const top = above >= 8 ? above : anchor.top + gap;
+  const top = anchor.top - size.height - gap;
   const left = anchor.left + anchor.width / 2 - size.width / 2;
 
   return (
@@ -63,17 +66,18 @@ export default function Toolbar({ selection, state, actions, anchor }: Props) {
       className="absolute z-30 flex items-center gap-1 rounded-xl border border-line-strong bg-surface-2 p-1 shadow-[0_10px_30px_rgba(0,0,0,0.55)]"
       style={{ left, top }}
     >
-      {selection.kind === "text" && <TextTools selection={selection} state={state} actions={actions} />}
-      {selection.kind === "image" && <ImageTools state={state} actions={actions} />}
-      {selection.kind === "collage" && (
-        <CollageTools id={selection.id} state={state} actions={actions} />
+      {selection.kind === "text" && (
+        <TextTools selection={selection} state={state} actions={actions} />
       )}
-      {selection.kind === "background" && <BackgroundTools state={state} actions={actions} />}
+      {selection.kind === "image" && <ImageTools state={state} actions={actions} />}
+      {selection.kind === "element" && (
+        <ElementTools id={selection.id} state={state} actions={actions} />
+      )}
     </div>
   );
 }
 
-/* ---------------- Texto ---------------- */
+/* ---------------- Textos fixos ---------------- */
 
 function TextTools({
   selection,
@@ -115,7 +119,7 @@ function TextTools({
   );
 }
 
-/* ---------------- Imagem principal ---------------- */
+/* ---------------- Imagem fixa do meio ---------------- */
 
 function ImageTools({ state, actions }: { state: BannerState; actions: ToolbarActions }) {
   const fileRef = useRef<HTMLInputElement>(null);
@@ -187,9 +191,9 @@ function ImageTools({ state, actions }: { state: BannerState; actions: ToolbarAc
   );
 }
 
-/* ---------------- Colagem ---------------- */
+/* ---------------- Elementos desenhados ---------------- */
 
-function CollageTools({
+function ElementTools({
   id,
   state,
   actions,
@@ -198,89 +202,128 @@ function CollageTools({
   state: BannerState;
   actions: ToolbarActions;
 }) {
-  const item = state.collage.find((c) => c.id === id);
-  if (!item) return null;
+  const el = state.elements.find((c) => c.id === id);
+  if (!el) return null;
+
+  const patch = (p: Partial<BannerElement>) => actions.updateElement(id, p);
+
   return (
     <>
+      {isShape(el) && (
+        <>
+          <Swatch
+            value={el.stroke}
+            label="Cor do traço"
+            onChange={(stroke) => {
+              patch({ stroke });
+              actions.setStyle({ stroke });
+            }}
+          />
+          <div className="flex items-center gap-0.5">
+            {STROKE_WIDTHS.map((w) => (
+              <button
+                key={w}
+                type="button"
+                title={`Traço ${w}`}
+                onClick={() => {
+                  patch({ strokeWidth: w });
+                  actions.setStyle({ strokeWidth: w });
+                }}
+                className={cx(
+                  "inline-flex size-8 items-center justify-center rounded-lg transition",
+                  el.strokeWidth === w ? "bg-[#2b2b2b]" : "hover:bg-[#2b2b2b]",
+                )}
+              >
+                <span
+                  className="block w-4 rounded-full bg-ink-dim"
+                  style={{ height: Math.max(1, w) }}
+                />
+              </button>
+            ))}
+          </div>
+          {el.type !== "line" && el.type !== "arrow" && el.type !== "draw" && (
+            <>
+              <Divider />
+              <Swatch
+                value={el.fill ?? "#ffc9c9"}
+                label="Cor de preenchimento"
+                onChange={(fill) => {
+                  patch({ fill });
+                  actions.setStyle({ fill });
+                }}
+              />
+              <IconButton
+                label={el.fill ? "Tirar preenchimento" : "Sem preenchimento"}
+                active={!el.fill}
+                onClick={() => {
+                  patch({ fill: el.fill ? null : "#ffc9c9" });
+                  actions.setStyle({ fill: el.fill ? null : "#ffc9c9" });
+                }}
+              >
+                <Icon.NoFill />
+              </IconButton>
+            </>
+          )}
+        </>
+      )}
+
+      {el.type === "text" && (
+        <>
+          <MiniSelect
+            value={el.font}
+            onChange={(e) => patch({ font: e.target.value as TextLayer["font"] })}
+            options={FONT_OPTIONS.map((f) => ({
+              value: f.key,
+              label: f.label,
+              style: { fontFamily: f.stack },
+            }))}
+          />
+          <Swatch value={el.color} label="Cor do texto" onChange={(color) => patch({ color })} />
+          <Divider />
+          <MiniSlider
+            label="Tamanho"
+            suffix="px"
+            min={10}
+            max={120}
+            width={80}
+            value={el.size}
+            onChange={(size) => patch({ size, height: el.text.split("\n").length * size * 1.25 })}
+          />
+        </>
+      )}
+
+      {el.type === "image" && (
+        <MiniSlider
+          label="Cantos"
+          suffix="%"
+          width={64}
+          min={0}
+          max={50}
+          value={el.radius}
+          onChange={(radius) => patch({ radius })}
+        />
+      )}
+
+      <Divider />
       <MiniSlider
         label="Opacidade"
         suffix="%"
-        min={0}
-        max={100}
-        value={Math.round(item.opacity * 100)}
-        onChange={(v) => actions.updateItem(id, { opacity: v / 100 })}
-      />
-      <Divider />
-      <MiniSlider
-        label="Giro"
-        suffix="°"
         width={72}
-        min={-180}
-        max={180}
-        value={item.rotation}
-        onChange={(rotation) => actions.updateItem(id, { rotation })}
+        min={10}
+        max={100}
+        value={Math.round(el.opacity * 100)}
+        onChange={(v) => patch({ opacity: v / 100 })}
       />
       <Divider />
-      <MiniSlider
-        label="Cantos"
-        suffix="%"
-        width={64}
-        min={0}
-        max={50}
-        value={item.radius}
-        onChange={(radius) => actions.updateItem(id, { radius })}
-      />
-      <Divider />
-      <IconButton label="Trazer para frente" onClick={() => actions.moveItem(id, "front")}>
+      <IconButton label="Trazer para frente" onClick={() => actions.moveElement(id, "front")}>
         <Icon.Front />
       </IconButton>
-      <IconButton label="Enviar para trás" onClick={() => actions.moveItem(id, "back")}>
+      <IconButton label="Enviar para trás" onClick={() => actions.moveElement(id, "back")}>
         <Icon.Back />
       </IconButton>
-      <IconButton
-        label="Acima do texto"
-        active={item.onTop}
-        onClick={() => actions.updateItem(id, { onTop: !item.onTop })}
-      >
-        <Icon.Layers />
-      </IconButton>
-      <Divider />
-      <IconButton label="Excluir" danger onClick={() => actions.removeItem(id)}>
+      <IconButton label="Excluir" danger onClick={() => actions.removeElement(id)}>
         <Icon.Trash />
       </IconButton>
-    </>
-  );
-}
-
-/* ---------------- Fundo ---------------- */
-
-function BackgroundTools({ state, actions }: { state: BannerState; actions: ToolbarActions }) {
-  const fileRef = useRef<HTMLInputElement>(null);
-  return (
-    <>
-      <span className="pl-2 pr-1 text-[11.5px] text-ink-faint">Fundo</span>
-      <Swatch
-        value={state.background}
-        label="Cor de fundo"
-        onChange={(background) => actions.update({ background })}
-      />
-      <Divider />
-      <input
-        ref={fileRef}
-        type="file"
-        accept="image/*"
-        multiple
-        hidden
-        onChange={(e) => {
-          const files = Array.from(e.target.files ?? []);
-          if (files.length) actions.addCollageFiles(files);
-          e.target.value = "";
-        }}
-      />
-      <Button variant="bare" size="sm" onClick={() => fileRef.current?.click()}>
-        <Icon.Plus />
-        Imagem na colagem
-      </Button>
     </>
   );
 }

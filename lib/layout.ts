@@ -46,6 +46,10 @@ function getMeasureCtx(): CanvasRenderingContext2D | null {
   return measureCtx;
 }
 
+export function measureLine(text: string, font: string): number {
+  return measure(text, font);
+}
+
 function measure(text: string, font: string): number {
   const ctx = getMeasureCtx();
   if (!ctx) return text.length * 0.55 * parseFloat(font);
@@ -83,7 +87,7 @@ export function wrapText(text: string, font: string, maxWidth: number): string[]
  */
 export function computeLayout(state: BannerState): Layout {
   const contentWidth = BANNER_WIDTH - PADDING * 2;
-  const order: TextLayerKey[] = ["title", "subtitle", "tagline"];
+  const order: TextLayerKey[] = ["title", "subtitle", "link"];
 
   const blocks = order
     .filter((key) => state[key].text.trim())

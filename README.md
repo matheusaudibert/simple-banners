@@ -1,7 +1,8 @@
-# simple-banners
+# Simple Banners
 
-Gerador de banners simples para devs. Foto, título, subtítulo e sub-subtítulo, colagem de
-imagens por cima e exportação em PNG — tudo no navegador.
+Gerador de banners simples para devs.
+
+![Preview](public/images/simplebanners.png)
 
 ## Rodando
 

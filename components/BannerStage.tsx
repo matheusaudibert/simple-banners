@@ -9,29 +9,43 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
+import {
+  TOOL_SHAPE,
+  bounds,
+  elementAt,
+  finishDraft,
+  newShape,
+  newText,
+  resizeDraft,
+  scaleElement,
+  type DrawStyle,
+} from "@/lib/elements";
 import type { ImageMap } from "@/lib/images";
-import { computeLayout } from "@/lib/layout";
-import { BANNER_HEIGHT, BANNER_WIDTH, PADDING } from "@/lib/presets";
+import { computeLayout, measureLine } from "@/lib/layout";
+import { BANNER_HEIGHT, BANNER_WIDTH, PADDING, fontStack } from "@/lib/presets";
 import { drawBanner, ensureFonts } from "@/lib/render";
 import type {
+  BannerElement,
   BannerState,
-  CollageItem,
+  Point,
   Selection,
   TextLayerKey,
+  Tool,
 } from "@/lib/types";
+import Dock from "./Dock";
 import Toolbar, { type ToolbarActions } from "./Toolbar";
 import { Chip, Icon, cx } from "./ui";
 
 const TEXT_LABELS: Record<TextLayerKey, string> = {
   title: "Título",
   subtitle: "Subtítulo",
-  tagline: "Sub-subtítulo",
+  link: "Link",
 };
 
 const NEW_TEXT: Record<TextLayerKey, string> = {
   title: "Título",
   subtitle: "Subtítulo",
-  tagline: "sub-subtítulo",
+  link: "https://seusite.dev",
 };
 
 type Props = {
@@ -41,27 +55,18 @@ type Props = {
   version: number;
   selection: Selection;
   onSelect: (selection: Selection) => void;
+  tool: Tool;
+  onToolChange: (tool: Tool) => void;
+  style: DrawStyle;
   actions: ToolbarActions;
-  onDropFiles: (files: File[], at: { x: number; y: number }) => void;
+  onDropFiles: (files: File[], at: Point) => void;
+  onPickImage: () => void;
 };
 
 type Drag =
-  | {
-      mode: "move";
-      id: string;
-      startX: number;
-      startY: number;
-      itemX: number;
-      itemY: number;
-    }
-  | {
-      mode: "resize";
-      id: string;
-      startX: number;
-      startY: number;
-      itemW: number;
-      itemH: number;
-    }
+  | { mode: "move"; id: string; startX: number; startY: number; elX: number; elY: number }
+  | { mode: "resize"; id: string; startX: number; startY: number; elW: number; elH: number }
+  | { mode: "rotate"; id: string; center: Point }
   | null;
 
 export default function BannerStage({
@@ -70,19 +75,26 @@ export default function BannerStage({
   version,
   selection,
   onSelect,
+  tool,
+  onToolChange,
+  style,
   actions,
   onDropFiles,
+  onPickImage,
 }: Props) {
   const stageRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const dragRef = useRef<Drag>(null);
-  const textRefs = useRef<
-    Partial<Record<TextLayerKey, HTMLTextAreaElement | null>>
-  >({});
-  const imageFileRef = useRef<HTMLInputElement>(null);
-  const collageFileRef = useRef<HTMLInputElement>(null);
+  const drawingRef = useRef<{ start: Point } | null>(null);
+  const textRefs = useRef<Partial<Record<TextLayerKey, HTMLTextAreaElement | null>>>({});
+  const editRef = useRef<HTMLTextAreaElement>(null);
+  const centerImageRef = useRef<HTMLInputElement>(null);
   const [scale, setScale] = useState(0.5);
   const [dragOver, setDragOver] = useState(false);
+  const [draft, setDraft] = useState<BannerElement | null>(null);
+  /** id do elemento de texto em edição */
+  const [editingId, setEditingId] = useState<string | null>(null);
+
   /* A diagramação depende de medir texto no canvas, o que só existe no
      navegador — a camada interativa entra depois da hidratação. */
   const mounted = useSyncExternalStore(
@@ -97,7 +109,7 @@ export default function BannerStage({
     if (!stage) return;
     const fit = () => {
       const w = stage.clientWidth - 96;
-      const h = stage.clientHeight - 170;
+      const h = stage.clientHeight - 215;
       if (w <= 0 || h <= 0) return;
       setScale(Math.min(w / BANNER_WIDTH, h / BANNER_HEIGHT, 1));
     };
@@ -112,7 +124,8 @@ export default function BannerStage({
   const fontSignature = [
     state.title.font,
     state.subtitle.font,
-    state.tagline.font,
+    state.link.font,
+    ...state.elements.map((el) => (el.type === "text" ? `${el.font}${el.size}` : "")),
   ].join("|");
 
   useEffect(() => {
@@ -142,31 +155,106 @@ export default function BannerStage({
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    drawBanner(ctx, state, images, pixelScale);
-  }, [state, images, version, scale, fontEpoch]);
+    drawBanner(ctx, state, images, pixelScale, draft);
+  }, [state, images, version, scale, fontEpoch, draft]);
 
-  /* --------- arrastar / redimensionar a colagem --------- */
+  /* --------- coordenadas do banner a partir do ponteiro --------- */
+  const toBanner = useCallback(
+    (e: { clientX: number; clientY: number }): Point => {
+      const rect = canvasRef.current?.getBoundingClientRect();
+      if (!rect) return { x: 0, y: 0 };
+      return { x: (e.clientX - rect.left) / scale, y: (e.clientY - rect.top) / scale };
+    },
+    [scale],
+  );
+
+  /* --------- criar elementos (ferramentas do dock) --------- */
+  const onSurfaceDown = (e: React.PointerEvent) => {
+    const at = toBanner(e);
+    (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+
+    if (tool === "eraser") {
+      const hit = elementAt(state.elements, at);
+      if (hit) actions.removeElement(hit.id);
+      drawingRef.current = { start: at };
+      return;
+    }
+
+    if (tool === "text") {
+      const el = newText(at, style);
+      actions.addElement(el);
+      onSelect({ kind: "element", id: el.id });
+      setEditingId(el.id);
+      onToolChange("select");
+      requestAnimationFrame(() => editRef.current?.focus());
+      return;
+    }
+
+    const kind = TOOL_SHAPE[tool];
+    if (!kind) return;
+    drawingRef.current = { start: at };
+    setDraft(newShape(kind, at, style));
+  };
+
+  const onSurfaceMove = (e: React.PointerEvent) => {
+    const drawing = drawingRef.current;
+    if (!drawing) return;
+    const at = toBanner(e);
+    if (tool === "eraser") {
+      const hit = elementAt(state.elements, at);
+      if (hit) actions.removeElement(hit.id);
+      return;
+    }
+    setDraft((d) => (d ? resizeDraft(d, drawing.start, at) : d));
+  };
+
+  const onSurfaceUp = () => {
+    drawingRef.current = null;
+    if (tool === "eraser") return;
+    if (!draft) return;
+    const finished = finishDraft(draft);
+    setDraft(null);
+    if (finished) {
+      actions.addElement(finished);
+      onSelect({ kind: "element", id: finished.id });
+    }
+    onToolChange("select");
+  };
+
+  /* --------- mover e redimensionar (ferramenta seta) --------- */
   const onPointerMove = useCallback(
     (e: React.PointerEvent) => {
       const drag = dragRef.current;
       if (!drag) return;
+      const el = state.elements.find((c) => c.id === drag.id);
+      if (!el) return;
+
+      if (drag.mode === "rotate") {
+        const p = toBanner(e);
+        // a alça fica em cima, por isso o giro de 90°
+        let angle = (Math.atan2(p.y - drag.center.y, p.x - drag.center.x) * 180) / Math.PI + 90;
+        if (e.shiftKey) angle = Math.round(angle / 15) * 15;
+        angle = Math.round(((angle + 540) % 360) - 180);
+        actions.updateElement(drag.id, { rotation: angle });
+        return;
+      }
+
       const dx = (e.clientX - drag.startX) / scale;
       const dy = (e.clientY - drag.startY) / scale;
       if (drag.mode === "move") {
-        actions.updateItem(drag.id, {
-          x: Math.round(drag.itemX + dx),
-          y: Math.round(drag.itemY + dy),
+        actions.updateElement(drag.id, {
+          x: Math.round(drag.elX + dx),
+          y: Math.round(drag.elY + dy),
         });
       } else {
-        const ratio = drag.itemH / drag.itemW;
-        const width = Math.max(16, Math.round(drag.itemW + (dx + dy) / 2));
-        actions.updateItem(drag.id, {
-          width,
-          height: Math.round(width * ratio),
-        });
+        const ratio = drag.elH / (drag.elW || 1);
+        const width = Math.max(8, Math.round(drag.elW + dx));
+        const height =
+          el.type === "image" ? Math.round(width * ratio) : Math.max(8, Math.round(drag.elH + dy));
+        actions.updateElement(drag.id, scaleElement(el, width, height));
       }
     },
-    [actions, scale],
+    [actions, scale, state.elements, toBanner],
   );
 
   const endDrag = (e: React.PointerEvent) => {
@@ -175,53 +263,79 @@ export default function BannerStage({
     (e.target as HTMLElement).releasePointerCapture?.(e.pointerId);
   };
 
-  const startMove = (e: React.PointerEvent, item: CollageItem) => {
+  const startMove = (e: React.PointerEvent, el: BannerElement) => {
     e.preventDefault();
-    onSelect({ kind: "collage", id: item.id });
+    e.stopPropagation();
+    onSelect({ kind: "element", id: el.id });
     dragRef.current = {
       mode: "move",
-      id: item.id,
+      id: el.id,
       startX: e.clientX,
       startY: e.clientY,
-      itemX: item.x,
-      itemY: item.y,
+      elX: el.x,
+      elY: el.y,
     };
     (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
   };
 
-  const startResize = (e: React.PointerEvent, item: CollageItem) => {
+  const startResize = (e: React.PointerEvent, el: BannerElement) => {
     e.preventDefault();
     e.stopPropagation();
     dragRef.current = {
       mode: "resize",
-      id: item.id,
+      id: el.id,
       startX: e.clientX,
       startY: e.clientY,
-      itemW: item.width,
-      itemH: item.height,
+      elW: el.width,
+      elH: el.height,
     };
     (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+  };
+
+  const startRotate = (e: React.PointerEvent, el: BannerElement) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const b = bounds(el);
+    dragRef.current = {
+      mode: "rotate",
+      id: el.id,
+      center: { x: b.x + b.width / 2, y: b.y + b.height / 2 },
+    };
+    (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+  };
+
+  /* --------- editar um texto solto --------- */
+  const onEditChange = (el: BannerElement, text: string) => {
+    if (el.type !== "text") return;
+    const font = `${el.size}px ${fontStack(el.font)}`;
+    const lines = text.split("\n");
+    const width = Math.max(10, ...lines.map((line) => measureLine(line, font)));
+    actions.updateElement(el.id, {
+      text,
+      width: Math.ceil(width),
+      height: lines.length * el.size * 1.25,
+    });
   };
 
   /* --------- soltar arquivos em cima do banner --------- */
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setDragOver(false);
-    const files = Array.from(e.dataTransfer.files).filter((f) =>
-      f.type.startsWith("image/"),
-    );
-    if (!files.length) return;
-    const rect = canvasRef.current?.getBoundingClientRect();
-    const at = rect
-      ? {
-          x: (e.clientX - rect.left) / scale,
-          y: (e.clientY - rect.top) / scale,
-        }
-      : { x: BANNER_WIDTH / 2, y: BANNER_HEIGHT / 2 };
-    onDropFiles(files, at);
+    const files = Array.from(e.dataTransfer.files).filter((f) => f.type.startsWith("image/"));
+    if (files.length) onDropFiles(files, toBanner(e));
   };
 
-  /* --------- escrever num texto vazio --------- */
+  /** a imagem do meio é a fixa do banner, não um elemento solto */
+  const pickCenterImage = (file: File) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      actions.updateImage({ src: String(reader.result), enabled: true });
+      onSelect({ kind: "image" });
+    };
+    reader.readAsDataURL(file);
+  };
+
+  /* --------- escrever num texto fixo vazio --------- */
   const addText = (key: TextLayerKey) => {
     actions.updateText(key, { text: NEW_TEXT[key] });
     onSelect({ kind: "text", key });
@@ -232,81 +346,36 @@ export default function BannerStage({
     });
   };
 
-  /* --------- teclado --------- */
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement | null;
-      const typing =
-        !!target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName);
-      if (e.key === "Escape") {
-        (document.activeElement as HTMLElement | null)?.blur?.();
-        onSelect(null);
-        return;
-      }
-      if (typing || selection?.kind !== "collage") return;
-      if (e.key === "Delete" || e.key === "Backspace") {
-        e.preventDefault();
-        actions.removeItem(selection.id);
-        return;
-      }
-      const step = e.shiftKey ? 10 : 1;
-      const moves: Record<string, [number, number]> = {
-        ArrowLeft: [-step, 0],
-        ArrowRight: [step, 0],
-        ArrowUp: [0, -step],
-        ArrowDown: [0, step],
-      };
-      const delta = moves[e.key];
-      if (!delta) return;
-      e.preventDefault();
-      const item = state.collage.find((c) => c.id === selection.id);
-      if (item)
-        actions.updateItem(item.id, {
-          x: item.x + delta[0],
-          y: item.y + delta[1],
-        });
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [actions, onSelect, selection, state.collage]);
-
   /* --------- onde a barra de opções encosta --------- */
   const contentWidth = BANNER_WIDTH - PADDING * 2;
   let anchor: { left: number; top: number; width: number } | null = null;
   if (selection?.kind === "text") {
     const laid = layout.texts.find((t) => t.key === selection.key);
-    if (laid)
-      anchor = {
-        left: PADDING * scale,
-        top: laid.y * scale,
-        width: contentWidth * scale,
-      };
+    if (laid) anchor = { left: PADDING * scale, top: laid.y * scale, width: contentWidth * scale };
   } else if (selection?.kind === "image" && layout.image) {
     anchor = {
       left: layout.image.x * scale,
       top: layout.image.y * scale,
       width: layout.image.size * scale,
     };
-  } else if (selection?.kind === "collage") {
-    const item = state.collage.find((c) => c.id === selection.id);
-    if (item)
-      anchor = {
-        left: item.x * scale,
-        top: item.y * scale,
-        width: item.width * scale,
-      };
-  } else if (selection?.kind === "background") {
-    anchor = { left: 0, top: 0, width: BANNER_WIDTH * scale };
+  } else if (selection?.kind === "element") {
+    const el = state.elements.find((c) => c.id === selection.id);
+    if (el) {
+      const b = bounds(el);
+      // 34px de folga para a barra não cobrir a alça de giro
+      anchor = { left: b.x * scale, top: b.y * scale - 34, width: b.width * scale };
+    }
   }
 
   const missingTexts = (Object.keys(TEXT_LABELS) as TextLayerKey[]).filter(
     (key) => !state[key].text.trim(),
   );
+  const selecting = tool === "select";
 
   return (
     <div
       ref={stageRef}
-      className="checkerboard relative flex min-h-0 flex-1 items-center justify-center overflow-hidden p-6"
+      className="relative flex min-h-0 flex-1 flex-col items-center justify-center gap-14 overflow-hidden p-6"
       onPointerDown={() => onSelect(null)}
       onDragOver={(e) => {
         e.preventDefault();
@@ -317,6 +386,15 @@ export default function BannerStage({
       }}
       onDrop={handleDrop}
     >
+      <div onPointerDown={(e) => e.stopPropagation()}>
+        <Dock
+          tool={tool}
+          onChange={(next) => (next === "image" ? onPickImage() : onToolChange(next))}
+          background={state.background}
+          onBackgroundChange={(background) => actions.update({ background })}
+        />
+      </div>
+
       <div className="flex flex-col items-center gap-4">
         <div
           className="relative shadow-[0_20px_60px_rgba(0,0,0,0.55)]"
@@ -329,106 +407,155 @@ export default function BannerStage({
           <canvas
             ref={canvasRef}
             className="block size-full"
-            onPointerDown={() => onSelect({ kind: "background" })}
+            onPointerDown={() => onSelect(null)}
           />
 
-          {/* imagem principal */}
-          {mounted && layout.image && (
-            <div
-              onPointerDown={() => onSelect({ kind: "image" })}
-              title="Clique para trocar a imagem"
-              className={cx(
-                "absolute cursor-pointer transition",
-                selection?.kind === "image"
-                  ? "ring-2 ring-accent"
-                  : "hover:ring-2 hover:ring-accent/40",
+          {mounted && (
+            <>
+              {/* imagem fixa do meio */}
+              {layout.image && selecting && (
+                <div
+                  onPointerDown={() => onSelect({ kind: "image" })}
+                  title="Clique para trocar a imagem"
+                  className={cx(
+                    "absolute cursor-pointer transition-shadow",
+                    selection?.kind === "image"
+                      ? "ring-2 ring-accent"
+                      : "hover:ring-2 hover:ring-accent/40",
+                  )}
+                  style={{
+                    left: layout.image.x * scale,
+                    top: layout.image.y * scale,
+                    width: layout.image.size * scale,
+                    height: layout.image.size * scale,
+                    borderRadius: layout.image.radius * scale,
+                  }}
+                />
               )}
-              style={{
-                left: layout.image.x * scale,
-                top: layout.image.y * scale,
-                width: layout.image.size * scale,
-                height: layout.image.size * scale,
-                borderRadius: layout.image.radius * scale,
-              }}
-            />
+
+              {/* textos fixos: dá pra escrever direto em cima do banner */}
+              {selecting &&
+                layout.texts.map((laid) => (
+                  <textarea
+                    key={laid.key}
+                    ref={(el) => {
+                      textRefs.current[laid.key] = el;
+                    }}
+                    value={state[laid.key].text}
+                    onChange={(e) => actions.updateText(laid.key, { text: e.target.value })}
+                    onFocus={() => onSelect({ kind: "text", key: laid.key })}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    spellCheck={false}
+                    rows={1}
+                    className={cx(
+                      "banner-text absolute resize-none overflow-hidden border-0 bg-transparent p-0 text-transparent outline-none transition-shadow",
+                      selection?.kind === "text" && selection.key === laid.key
+                        ? "ring-2 ring-accent"
+                        : "hover:ring-2 hover:ring-accent/40",
+                    )}
+                    style={{
+                      left: PADDING * scale,
+                      top: laid.y * scale,
+                      width: contentWidth * scale,
+                      height: laid.lines.length * laid.lineHeight * scale,
+                      font: `${laid.weight} ${laid.size * scale}px ${laid.family}`,
+                      lineHeight: `${laid.lineHeight * scale}px`,
+                      textAlign: "center",
+                      caretColor: laid.color,
+                    }}
+                  />
+                ))}
+
+              {/* elementos desenhados */}
+              {selecting &&
+                state.elements.map((el) => {
+                  const selected = selection?.kind === "element" && selection.id === el.id;
+                  const b = bounds(el);
+                  const isEditing = el.id === editingId && el.type === "text";
+                  return (
+                    <div
+                      key={el.id}
+                      onPointerDown={(e) => {
+                        if (!isEditing) startMove(e, el);
+                      }}
+                      onDoubleClick={() => {
+                        if (el.type === "text") {
+                          setEditingId(el.id);
+                          requestAnimationFrame(() => editRef.current?.focus());
+                        }
+                      }}
+                      className={cx(
+                        "absolute touch-none transition-shadow",
+                        isEditing
+                          ? "ring-2 ring-accent"
+                          : selected
+                            ? "cursor-grabbing ring-2 ring-accent"
+                            : "cursor-grab hover:ring-2 hover:ring-accent/40",
+                      )}
+                      style={{
+                        left: b.x * scale,
+                        top: b.y * scale,
+                        width: b.width * scale,
+                        height: b.height * scale,
+                        transform: el.rotation ? `rotate(${el.rotation}deg)` : undefined,
+                      }}
+                    >
+                      {isEditing && el.type === "text" && (
+                        <textarea
+                          ref={editRef}
+                          value={el.text}
+                          onChange={(e) => onEditChange(el, e.target.value)}
+                          onBlur={() => {
+                            setEditingId(null);
+                            if (!el.text.trim()) actions.removeElement(el.id);
+                          }}
+                          onPointerDown={(e) => e.stopPropagation()}
+                          spellCheck={false}
+                          rows={1}
+                          className="banner-text absolute inset-0 size-full resize-none overflow-hidden whitespace-pre border-0 bg-transparent p-0 text-transparent outline-none"
+                          style={{
+                            font: `${el.size * scale}px ${fontStack(el.font)}`,
+                            lineHeight: `${el.size * 1.25 * scale}px`,
+                            caretColor: el.color,
+                          }}
+                        />
+                      )}
+                      {selected && !isEditing && (
+                        <>
+                          <span
+                            onPointerDown={(e) => startResize(e, el)}
+                            className="absolute -bottom-[7px] -right-[7px] size-3.5 cursor-nwse-resize rounded-full bg-accent"
+                          />
+                          {/* alça de giro, presa por um fio acima da caixa */}
+                          <span className="pointer-events-none absolute -top-6 left-1/2 h-6 w-px -translate-x-1/2 bg-accent/60" />
+                          <span
+                            title="Arraste para girar (Shift trava em 15°)"
+                            onPointerDown={(e) => startRotate(e, el)}
+                            className="absolute -top-[30px] left-1/2 size-3.5 -translate-x-1/2 cursor-grab rounded-full border-2 border-accent bg-canvas"
+                          />
+                        </>
+                      )}
+                    </div>
+                  );
+                })}
+
+              {/* superfície de desenho: só existe quando há ferramenta ativa */}
+              {!selecting && (
+                <div
+                  onPointerDown={onSurfaceDown}
+                  onPointerMove={onSurfaceMove}
+                  onPointerUp={onSurfaceUp}
+                  onPointerCancel={onSurfaceUp}
+                  className={cx(
+                    "absolute inset-0 touch-none",
+                    tool === "eraser" ? "cursor-cell" : "cursor-crosshair",
+                  )}
+                />
+              )}
+            </>
           )}
 
-          {/* textos: dá pra escrever direto em cima do banner */}
-          {mounted &&
-            layout.texts.map((laid) => (
-              <textarea
-                key={laid.key}
-                ref={(el) => {
-                  textRefs.current[laid.key] = el;
-                }}
-                value={state[laid.key].text}
-                onChange={(e) =>
-                  actions.updateText(laid.key, { text: e.target.value })
-                }
-                onFocus={() => onSelect({ kind: "text", key: laid.key })}
-                onPointerDown={(e) => e.stopPropagation()}
-                spellCheck={false}
-                rows={1}
-                className={cx(
-                  "banner-text absolute resize-none overflow-hidden border-0 bg-transparent p-0 text-transparent outline-none transition",
-                  selection?.kind === "text" && selection.key === laid.key
-                    ? "ring-2 ring-accent"
-                    : "hover:ring-2 hover:ring-accent/40",
-                )}
-                style={{
-                  left: PADDING * scale,
-                  top: laid.y * scale,
-                  width: contentWidth * scale,
-                  height: laid.lines.length * laid.lineHeight * scale,
-                  font: `${laid.weight} ${laid.size * scale}px ${laid.family}`,
-                  lineHeight: `${laid.lineHeight * scale}px`,
-                  textAlign: "center",
-                  caretColor: laid.color,
-                }}
-              />
-            ))}
-
-          {/* colagem */}
-          {state.collage.map((item) => {
-            const selected =
-              selection?.kind === "collage" && selection.id === item.id;
-            return (
-              <div
-                key={item.id}
-                onPointerDown={(e) => {
-                  e.stopPropagation();
-                  startMove(e, item);
-                }}
-                className={cx(
-                  "absolute touch-none transition",
-                  selected
-                    ? "cursor-grabbing ring-2 ring-accent"
-                    : "cursor-grab hover:ring-2 hover:ring-accent/40",
-                )}
-                style={{
-                  left: item.x * scale,
-                  top: item.y * scale,
-                  width: item.width * scale,
-                  height: item.height * scale,
-                  transform: `rotate(${item.rotation}deg)`,
-                }}
-              >
-                {selected && (
-                  <span
-                    onPointerDown={(e) => startResize(e, item)}
-                    className="absolute -bottom-[7px] -right-[7px] size-3.5 cursor-nwse-resize rounded-full bg-accent"
-                  />
-                )}
-              </div>
-            );
-          })}
-
-          <Toolbar
-            selection={selection}
-            state={state}
-            actions={actions}
-            anchor={anchor}
-          />
+          <Toolbar selection={selection} state={state} actions={actions} anchor={anchor} />
         </div>
 
         {/* barra de adicionar */}
@@ -436,16 +563,24 @@ export default function BannerStage({
           className="flex flex-wrap items-center justify-center gap-2"
           onPointerDown={(e) => e.stopPropagation()}
         >
-          <span className="text-[12px] tabular-nums text-ink-faint">
-            {BANNER_WIDTH} × {BANNER_HEIGHT} · {Math.round(scale * 100)}%
-          </span>
-          <span className="mx-1 h-4 w-px bg-line" />
-
           {!state.image.src && (
-            <Chip onClick={() => imageFileRef.current?.click()}>
-              <Icon.Plus />
-              Imagem
-            </Chip>
+            <>
+              <Chip onClick={() => centerImageRef.current?.click()}>
+                <Icon.Plus />
+                Imagem do meio
+              </Chip>
+              <input
+                ref={centerImageRef}
+                type="file"
+                accept="image/*"
+                hidden
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) pickCenterImage(file);
+                  e.target.value = "";
+                }}
+              />
+            </>
           )}
           {missingTexts.map((key) => (
             <Chip key={key} onClick={() => addText(key)}>
@@ -453,50 +588,12 @@ export default function BannerStage({
               {TEXT_LABELS[key]}
             </Chip>
           ))}
-          <Chip onClick={() => collageFileRef.current?.click()}>
-            <Icon.Plus />
-            Colagem
-          </Chip>
-
-          <input
-            ref={imageFileRef}
-            type="file"
-            accept="image/*"
-            hidden
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (file) {
-                const reader = new FileReader();
-                reader.onload = () => {
-                  actions.updateImage({
-                    src: String(reader.result),
-                    enabled: true,
-                  });
-                  onSelect({ kind: "image" });
-                };
-                reader.readAsDataURL(file);
-              }
-              e.target.value = "";
-            }}
-          />
-          <input
-            ref={collageFileRef}
-            type="file"
-            accept="image/*"
-            multiple
-            hidden
-            onChange={(e) => {
-              const files = Array.from(e.target.files ?? []);
-              if (files.length) actions.addCollageFiles(files);
-              e.target.value = "";
-            }}
-          />
         </div>
       </div>
 
       {dragOver && (
         <div className="pointer-events-none absolute inset-4 flex items-center justify-center rounded-xl border-2 border-dashed border-ink-faint bg-canvas/85 font-medium text-ink-dim">
-          Solte para adicionar à colagem
+          Solte para adicionar a imagem
         </div>
       )}
     </div>
