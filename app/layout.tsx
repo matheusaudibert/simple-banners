@@ -4,7 +4,7 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "Simple Banners",
   description:
-    "Gerador de banners simples: foto, título, subtítulo, sub-subtítulo e colagem — exporta PNG.",
+    "Gerador de banners simples para devs.",
 };
 
 export default function RootLayout({
