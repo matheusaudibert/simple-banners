@@ -8,6 +8,8 @@ import type {
   Tool,
 } from "./types";
 import { isShape } from "./types";
+import { measureLine } from "./layout";
+import { BANNER_WIDTH, fontStack } from "./presets";
 
 /** Estilo com que os próximos elementos nascem. */
 export type DrawStyle = {
@@ -72,6 +74,36 @@ export function newText(at: Point, style: DrawStyle): TextElement {
     color: style.color,
     font: style.font,
     size: style.fontSize,
+  };
+}
+
+/**
+ * Texto vindo da área de transferência: já nasce medido e centrado no ponto.
+ * Se a linha mais longa não couber no banner, a fonte encolhe até caber.
+ */
+export function newPastedText(text: string, center: Point, style: DrawStyle): TextElement {
+  const lines = text.split("\n");
+  const widthAt = (size: number) =>
+    Math.max(10, ...lines.map((line) => measureLine(line, `${size}px ${fontStack(style.font)}`)));
+
+  const maxWidth = BANNER_WIDTH - 80;
+  const natural = widthAt(style.fontSize);
+  const size =
+    natural > maxWidth
+      ? Math.max(10, Math.floor((style.fontSize * maxWidth) / natural))
+      : style.fontSize;
+
+  const width = Math.ceil(widthAt(size));
+  const height = lines.length * size * 1.25;
+
+  return {
+    ...newText({ x: 0, y: 0 }, style),
+    x: Math.round(center.x - width / 2),
+    y: Math.round(center.y - height / 2),
+    width,
+    height,
+    size,
+    text,
   };
 }
 
@@ -201,4 +233,24 @@ export function styleOf(el: BannerElement): Partial<DrawStyle> {
     return { color: el.color, font: el.font, fontSize: el.size, opacity: el.opacity };
   }
   return { opacity: el.opacity };
+}
+
+/* ===================== Área de transferência ===================== */
+
+const CLIPBOARD_TAG = "simple-banners/element";
+
+/** Copiar um elemento escreve isto no clipboard do sistema, como texto. */
+export function encodeElement(el: BannerElement): string {
+  return JSON.stringify({ tag: CLIPBOARD_TAG, element: el });
+}
+
+/** Reconhece um elemento nosso colado de volta; qualquer outro texto vira null. */
+export function decodeElement(text: string): BannerElement | null {
+  if (!text.includes(CLIPBOARD_TAG)) return null;
+  try {
+    const data = JSON.parse(text) as { tag?: string; element?: BannerElement };
+    return data.tag === CLIPBOARD_TAG && data.element?.id ? data.element : null;
+  } catch {
+    return null;
+  }
 }

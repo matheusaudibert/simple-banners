@@ -5,7 +5,14 @@ import BannerStage from "@/components/BannerStage";
 import ExportButton from "@/components/ExportButton";
 import type { ToolbarActions } from "@/components/Toolbar";
 import { Button, Icon, IconButton } from "@/components/ui";
-import { DEFAULT_STYLE, newImage, type DrawStyle } from "@/lib/elements";
+import {
+  DEFAULT_STYLE,
+  decodeElement,
+  encodeElement,
+  newImage,
+  newPastedText,
+  type DrawStyle,
+} from "@/lib/elements";
 import { useHistoryState } from "@/lib/history";
 import { fileToDataUrl, useImageStore, useNaturalSize } from "@/lib/images";
 import {
@@ -28,6 +35,9 @@ import type {
 } from "@/lib/types";
 
 const STORAGE_KEY = "simple-banners:v2";
+
+/** Texto colado que é, na verdade, uma imagem: entra como imagem. */
+const IMAGE_URL = /^(data:image\/|https?:\/\/\S+\.(?:png|jpe?g|gif|webp|svg|avif)(?:\?\S*)?$)/i;
 
 export default function Page() {
   const initialState = useMemo(() => defaultState(), []);
@@ -196,6 +206,19 @@ export default function Page() {
     [addImage],
   );
 
+  const addPastedText = useCallback(
+    (text: string, at?: Point) => {
+      const el = newPastedText(
+        text,
+        at ?? { x: BANNER_WIDTH / 2, y: BANNER_HEIGHT / 2 },
+        style,
+      );
+      addElement(el);
+      setSelection({ kind: "element", id: el.id });
+    },
+    [addElement, style],
+  );
+
   /** duplica um elemento, deslocado para não ficar exatamente por cima */
   const pasteElement = useCallback(
     (el: BannerElement) => {
@@ -263,14 +286,15 @@ export default function Page() {
         if ((key === "c" || key === "x") && el) {
           e.preventDefault();
           clipboard.current = el;
+          // vai também para o clipboard do sistema: assim o Ctrl+V sabe
+          // distinguir um elemento nosso de um texto ou imagem de fora
+          navigator.clipboard?.writeText(encodeElement(el)).catch(() => {
+            /* sem permissão: sobra a cópia interna */
+          });
           if (key === "x") removeElement(el.id);
           setToast(key === "x" ? "Elemento recortado." : "Elemento copiado.");
-          return;
         }
-        if (key === "v" && clipboard.current) {
-          e.preventDefault();
-          pasteElement(clipboard.current);
-        }
+        // Ctrl+V não é tratado aqui: quem resolve é o evento "paste"
         return;
       }
 
@@ -327,23 +351,58 @@ export default function Page() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [undo, redo, selection, state.elements, removeElement, pasteElement, updateElement, chooseTool]);
+  }, [undo, redo, selection, state.elements, removeElement, updateElement, chooseTool]);
 
-  /* ---------------- colar imagem do sistema ---------------- */
+  /* ---------------- colar (Ctrl+V) ----------------
+     Imagem vira imagem, texto vira texto, e um elemento copiado daqui
+     volta como elemento. Dentro de um campo de texto, o colar é o normal. */
   useEffect(() => {
     const onPaste = (e: ClipboardEvent) => {
       const target = e.target as HTMLElement | null;
       if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
-      const files = Array.from(e.clipboardData?.files ?? []).filter((f) =>
-        f.type.startsWith("image/"),
-      );
-      if (!files.length) return;
+      const data = e.clipboardData;
+      if (!data) return;
+
+      // nem todo navegador expõe a imagem em `files`; `items` cobre os dois
+      const fromItems = Array.from(data.items ?? [])
+        .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+        .map((item) => item.getAsFile())
+        .filter((file): file is File => !!file);
+      const files = fromItems.length
+        ? fromItems
+        : Array.from(data.files ?? []).filter((f) => f.type.startsWith("image/"));
+
+      if (files.length) {
+        e.preventDefault();
+        void addImageFiles(files);
+        return;
+      }
+
+      const text = data.getData("text/plain");
+
+      const copied = decodeElement(text);
+      if (copied) {
+        e.preventDefault();
+        pasteElement(copied);
+        return;
+      }
+
+      if (!text.trim()) {
+        // o clipboard do sistema não guardou nada nosso; usa a cópia interna
+        if (clipboard.current) {
+          e.preventDefault();
+          pasteElement(clipboard.current);
+        }
+        return;
+      }
+
       e.preventDefault();
-      void addImageFiles(files);
+      if (IMAGE_URL.test(text.trim())) void addImage(text.trim());
+      else addPastedText(text);
     };
     window.addEventListener("paste", onPaste);
     return () => window.removeEventListener("paste", onPaste);
-  }, [addImageFiles]);
+  }, [addImageFiles, addImage, addPastedText, pasteElement]);
 
   /* ---------------- toast ---------------- */
   useEffect(() => {
